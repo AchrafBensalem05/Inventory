@@ -1,0 +1,28 @@
+appId: com.yourcompany.oilgas-inventory
+productName: OilGas Inventory
+directories:
+  output: dist
+files:
+  - electron/**
+  - package.json
+extraResources:
+  - from: php/
+    to: php/
+  - from: .
+    to: app/
+    filter:
+      - "artisan"
+      - "app/**"
+      - "bootstrap/**"
+      - "config/**"
+      - "database/**"
+      - "public/**"
+      - "resources/**"
+      - "routes/**"
+      - "storage/**"
+      - "vendor/**"
+      - ".env"
+win:
+  target: nsis
+mac:
+  target: dmg
