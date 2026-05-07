@@ -8,6 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1"></script>
     <style>
         :root {
             --bg: #f5efe7;
@@ -239,6 +240,62 @@
             min-width: 420px;
             flex-basis: 420px;
         }
+        .range-controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-top: 12px;
+        }
+        .range-label {
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 6px;
+            display: block;
+        }
+        .modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(13, 27, 42, 0.65);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            z-index: 1000;
+        }
+        .modal.open {
+            display: flex;
+        }
+        .modal-card {
+            background: var(--card);
+            width: min(1200px, 95vw);
+            max-height: 90vh;
+            border-radius: 18px;
+            box-shadow: 0 30px 60px rgba(13, 27, 42, 0.35);
+            display: flex;
+            flex-direction: column;
+        }
+        .modal-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid rgba(13, 27, 42, 0.08);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .modal-body {
+            padding: 16px 20px 24px;
+            overflow: auto;
+        }
+        .modal-canvas {
+            width: 100%;
+            height: 60vh;
+        }
+        .modal-actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
         .pager {
             display: flex;
             align-items: center;
@@ -395,7 +452,29 @@
             </form>
         </section>
 
+        <section class="card">
+            <h2>Chart window</h2>
+            <p class="subtitle">Show a smaller time slice and scroll through large datasets.</p>
+            <div class="range-controls">
+                <div>
+                    <label for="windowSize">Window size</label>
+                    <select id="windowSize">
+                        <option value="60">2 months</option>
+                        <option value="180">6 months</option>
+                        <option value="365">1 year</option>
+                        <option value="all">All data</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="windowStart">Scroll window</label>
+                    <input id="windowStart" type="range" min="0" max="0" value="0">
+                    <span id="windowLabel" class="range-label">No data loaded yet.</span>
+                </div>
+            </div>
+        </section>
+
         <section>
+            <p class="helper">Click any chart to open a zoomable view.</p>
             <div class="chart-strip">
                 <div class="card chart-card wide">
                     <h2>Load trend by unit</h2>
@@ -488,6 +567,24 @@
         </section>
     </main>
 
+    <div class="modal" id="chartModal" aria-hidden="true">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div>
+                    <h2 id="modalTitle">Chart detail</h2>
+                    <p class="subtitle" id="modalSubtitle">Scroll or pinch to zoom. Drag to pan.</p>
+                </div>
+                <div class="modal-actions">
+                    <button class="button secondary" id="modalReset" type="button">Reset zoom</button>
+                    <button class="button" id="modalClose" type="button">Close</button>
+                </div>
+            </div>
+            <div class="modal-body">
+                <canvas id="modalChart" class="modal-canvas"></canvas>
+            </div>
+        </div>
+    </div>
+
     <script>
         const statusLabels = @json($statusLabels);
         const statusValues = @json($statusValues);
@@ -502,6 +599,10 @@
         const topUnitLabels = @json($topUnitLabels);
         const topUnitValues = @json($topUnitValues);
 
+        const windowSizeSelect = document.getElementById('windowSize');
+        const windowStartInput = document.getElementById('windowStart');
+        const windowLabel = document.getElementById('windowLabel');
+
         const statusChart = document.getElementById('statusChart');
         const trendChart = document.getElementById('trendChart');
         const monthlyChart = document.getElementById('monthlyChart');
@@ -509,34 +610,193 @@
         const distributionChart = document.getElementById('distributionChart');
         const topUnitsChart = document.getElementById('topUnitsChart');
 
+        const modal = document.getElementById('chartModal');
+        const modalTitle = document.getElementById('modalTitle');
+        const modalClose = document.getElementById('modalClose');
+        const modalReset = document.getElementById('modalReset');
+        const modalCanvas = document.getElementById('modalChart');
+        let modalChart = null;
+
         const lineBaseOptions = {
             interaction: { mode: 'index', intersect: false },
             elements: { point: { radius: 0 } },
             scales: { y: { beginAtZero: true } }
         };
 
-        if (statusChart) {
-            new Chart(statusChart, {
-                type: 'bar',
-                data: {
-                    labels: statusLabels,
-                    datasets: [{
-                        label: 'Rows',
-                        data: statusValues,
-                        backgroundColor: '#0b7b6e',
-                        borderRadius: 8
-                    }]
-                },
-                options: {
-                    plugins: {
-                        legend: { display: false }
-                    },
-                    scales: {
-                        y: { beginAtZero: true }
-                    }
+        const zoomOptions = {
+            zoom: {
+                wheel: { enabled: true },
+                pinch: { enabled: true },
+                mode: 'x'
+            },
+            pan: {
+                enabled: true,
+                mode: 'x'
+            }
+        };
+
+        function openModal(title, config) {
+            if (!modal || !modalCanvas) {
+                return;
+            }
+
+            modalTitle.textContent = title;
+            modal.classList.add('open');
+            document.body.style.overflow = 'hidden';
+
+            if (modalChart) {
+                modalChart.destroy();
+            }
+
+            const options = config.options ? { ...config.options } : {};
+            const plugins = options.plugins ? { ...options.plugins } : {};
+            plugins.zoom = zoomOptions;
+            options.plugins = plugins;
+            options.maintainAspectRatio = false;
+
+            modalChart = new Chart(modalCanvas, {
+                ...config,
+                options
+            });
+        }
+
+        function closeModal() {
+            if (!modal) {
+                return;
+            }
+            modal.classList.remove('open');
+            document.body.style.overflow = '';
+            if (modalChart) {
+                modalChart.destroy();
+                modalChart = null;
+            }
+        }
+
+        if (modalClose) {
+            modalClose.addEventListener('click', closeModal);
+        }
+
+        if (modalReset) {
+            modalReset.addEventListener('click', () => {
+                if (modalChart && typeof modalChart.resetZoom === 'function') {
+                    modalChart.resetZoom();
                 }
             });
         }
+
+        if (modal) {
+            modal.addEventListener('click', (event) => {
+                if (event.target === modal) {
+                    closeModal();
+                }
+            });
+        }
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                closeModal();
+            }
+        });
+
+        function buildLineConfig(labels, datasets, legendPosition = 'bottom') {
+            return {
+                type: 'line',
+                data: { labels, datasets },
+                options: {
+                    plugins: { legend: { position: legendPosition } },
+                    ...lineBaseOptions
+                }
+            };
+        }
+
+        function buildBarConfig(labels, datasets) {
+            return {
+                type: 'bar',
+                data: { labels, datasets },
+                options: {
+                    plugins: { legend: { display: false } },
+                    scales: { y: { beginAtZero: true } }
+                }
+            };
+        }
+
+        function updateWindowedChart(chart, fullData, windowSize, ratio) {
+            if (!chart || fullData.labels.length === 0) {
+                return;
+            }
+
+            const total = fullData.labels.length;
+            const size = Math.min(windowSize, total);
+            const maxStart = Math.max(0, total - size);
+            const start = Math.round(maxStart * ratio);
+            const end = start + size;
+
+            chart.data.labels = fullData.labels.slice(start, end);
+            chart.data.datasets = fullData.datasets.map((dataset) => ({
+                ...dataset,
+                data: dataset.data.slice(start, end)
+            }));
+            chart.update();
+        }
+
+        function updateWindowLabel(referenceLabels, windowSize, ratio) {
+            if (!windowLabel) {
+                return;
+            }
+
+            if (!referenceLabels || referenceLabels.length === 0) {
+                windowLabel.textContent = 'No data loaded yet.';
+                return;
+            }
+
+            const total = referenceLabels.length;
+            const size = Math.min(windowSize, total);
+            const maxStart = Math.max(0, total - size);
+            const start = Math.round(maxStart * ratio);
+            const endIndex = Math.min(start + size - 1, total - 1);
+            const startLabel = referenceLabels[start];
+            const endLabel = referenceLabels[endIndex];
+
+            windowLabel.textContent = `${startLabel} to ${endLabel}`;
+        }
+
+        function applyWindow(trendFull, dailyFull, trendChartInstance, dailyChartInstance) {
+            if (!windowSizeSelect || !windowStartInput) {
+                return;
+            }
+
+            const referenceLabels = dailyFull.labels.length ? dailyFull.labels : trendFull.labels;
+            const total = referenceLabels.length;
+            const windowSizeValue = windowSizeSelect.value;
+            const windowSize = windowSizeValue === 'all' ? total : parseInt(windowSizeValue, 10);
+
+            const maxStart = Math.max(0, total - windowSize);
+            windowStartInput.max = maxStart.toString();
+            const startValue = Math.min(parseInt(windowStartInput.value || '0', 10), maxStart);
+            windowStartInput.value = startValue.toString();
+            windowStartInput.disabled = maxStart === 0;
+
+            const ratio = maxStart > 0 ? startValue / maxStart : 0;
+
+            updateWindowedChart(trendChartInstance, trendFull, windowSize, ratio);
+            updateWindowedChart(dailyChartInstance, dailyFull, windowSize, ratio);
+            updateWindowLabel(referenceLabels, windowSize, ratio);
+        }
+
+        if (statusChart) {
+            const statusDatasets = [{
+                label: 'Rows',
+                data: statusValues,
+                backgroundColor: '#0b7b6e',
+                borderRadius: 8
+            }];
+            const statusConfig = buildBarConfig(statusLabels, statusDatasets);
+            new Chart(statusChart, statusConfig);
+            statusChart.addEventListener('click', () => openModal('Status mix', statusConfig));
+        }
+
+        let trendChartInstance = null;
+        let dailyChartInstance = null;
 
         if (trendChart) {
             const trendDatasets = trendSeries.map((series) => ({
@@ -546,97 +806,79 @@
                 spanGaps: true
             }));
 
-            new Chart(trendChart, {
-                type: 'line',
-                data: {
-                    labels: trendLabels,
-                    datasets: trendDatasets
-                },
-                options: {
-                    plugins: { legend: { position: 'bottom' } },
-                    ...lineBaseOptions
-                }
-            });
+            const trendConfig = buildLineConfig(trendLabels, trendDatasets, 'bottom');
+            const trendFull = { labels: trendLabels, datasets: trendDatasets };
+
+            trendChartInstance = new Chart(trendChart, trendConfig);
+            trendChart.addEventListener('click', () => openModal('Load trend by unit', buildLineConfig(trendFull.labels, trendFull.datasets, 'bottom')));
+
+            const dailyDatasets = [{
+                label: 'Records',
+                data: dailyValues,
+                borderColor: '#7c3aed',
+                backgroundColor: 'rgba(124, 58, 237, 0.12)',
+                tension: 0.2,
+                fill: true
+            }];
+            const dailyFull = { labels: dailyLabels, datasets: dailyDatasets };
+
+            if (dailyChart) {
+                const dailyConfig = buildLineConfig(dailyFull.labels, dailyFull.datasets, 'bottom');
+                dailyChartInstance = new Chart(dailyChart, dailyConfig);
+                dailyChart.addEventListener('click', () => openModal('Records per day', buildLineConfig(dailyFull.labels, dailyFull.datasets, 'bottom')));
+            }
+
+            applyWindow(trendFull, dailyFull, trendChartInstance, dailyChartInstance);
+
+            if (windowSizeSelect) {
+                windowSizeSelect.addEventListener('change', () => {
+                    applyWindow(trendFull, dailyFull, trendChartInstance, dailyChartInstance);
+                });
+            }
+
+            if (windowStartInput) {
+                windowStartInput.addEventListener('input', () => {
+                    applyWindow(trendFull, dailyFull, trendChartInstance, dailyChartInstance);
+                });
+            }
         }
 
         if (monthlyChart) {
-            new Chart(monthlyChart, {
-                type: 'line',
-                data: {
-                    labels: monthlyLabels,
-                    datasets: [{
-                        label: 'Avg MW',
-                        data: monthlyValues,
-                        borderColor: '#2563eb',
-                        backgroundColor: 'rgba(37, 99, 235, 0.15)',
-                        tension: 0.3,
-                        fill: true
-                    }]
-                },
-                options: {
-                    plugins: { legend: { display: false } },
-                    ...lineBaseOptions
-                }
-            });
-        }
-
-        if (dailyChart) {
-            new Chart(dailyChart, {
-                type: 'line',
-                data: {
-                    labels: dailyLabels,
-                    datasets: [{
-                        label: 'Records',
-                        data: dailyValues,
-                        borderColor: '#7c3aed',
-                        backgroundColor: 'rgba(124, 58, 237, 0.12)',
-                        tension: 0.2,
-                        fill: true
-                    }]
-                },
-                options: {
-                    plugins: { legend: { display: false } },
-                    ...lineBaseOptions
-                }
-            });
+            const monthlyDatasets = [{
+                label: 'Avg MW',
+                data: monthlyValues,
+                borderColor: '#2563eb',
+                backgroundColor: 'rgba(37, 99, 235, 0.15)',
+                tension: 0.3,
+                fill: true
+            }];
+            const monthlyConfig = buildLineConfig(monthlyLabels, monthlyDatasets, 'bottom');
+            new Chart(monthlyChart, monthlyConfig);
+            monthlyChart.addEventListener('click', () => openModal('Average load by month', monthlyConfig));
         }
 
         if (distributionChart) {
-            new Chart(distributionChart, {
-                type: 'bar',
-                data: {
-                    labels: distributionLabels,
-                    datasets: [{
-                        label: 'Rows',
-                        data: distributionValues,
-                        backgroundColor: '#d16a2b',
-                        borderRadius: 8
-                    }]
-                },
-                options: {
-                    plugins: { legend: { display: false } },
-                    scales: { y: { beginAtZero: true } }
-                }
-            });
+            const distributionDatasets = [{
+                label: 'Rows',
+                data: distributionValues,
+                backgroundColor: '#d16a2b',
+                borderRadius: 8
+            }];
+            const distributionConfig = buildBarConfig(distributionLabels, distributionDatasets);
+            new Chart(distributionChart, distributionConfig);
+            distributionChart.addEventListener('click', () => openModal('Load distribution', distributionConfig));
         }
 
         if (topUnitsChart) {
-            new Chart(topUnitsChart, {
-                type: 'bar',
-                data: {
-                    labels: topUnitLabels,
-                    datasets: [{
-                        label: 'Avg MW',
-                        data: topUnitValues,
-                        backgroundColor: '#0b7b6e',
-                        borderRadius: 8
-                    }]
-                },
-                options: {
-                    plugins: { legend: { display: false } },
-                    scales: { y: { beginAtZero: true } }
-                }
-            });
+            const topUnitsDatasets = [{
+                label: 'Avg MW',
+                data: topUnitValues,
+                backgroundColor: '#0b7b6e',
+                borderRadius: 8
+            }];
+            const topUnitsConfig = buildBarConfig(topUnitLabels, topUnitsDatasets);
+            new Chart(topUnitsChart, topUnitsConfig);
+            topUnitsChart.addEventListener('click', () => openModal('Top units by avg MW', topUnitsConfig));
         }
     </script>
 </body>
